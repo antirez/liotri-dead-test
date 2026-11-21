@@ -20,11 +20,14 @@ orbit a live trace of SID voice 3 while the SID plays a three-voice tune.
 
 ## Run the cartridge
 
-The ready-to-use image is [liotri.crt](liotri.crt). On a physical C64,
-program the image into an EasyFlash-compatible cartridge, enable its boot
-jumper, and power on. **The tests overwrite C64 RAM.** RESET starts a fresh
-run and clears the recorded faults. The 586220 harness enables the optional
-external port checks.
+The ready-to-use image is [liotri.crt](liotri.crt). The original Kung Fu
+Flash and Kung Fu Flash 2 both support its EasyFlash format. Copy
+`liotri.crt` to a FAT-formatted microSD card and select it in the cartridge
+launcher. [Kung Fu Flash documentation](https://github.com/KimJorgensen/KungFuFlash/tree/v1.50#supported-cartridges) · [Kung Fu Flash 2 documentation](https://github.com/KimJorgensen/KungFuFlash2/tree/v2.04#supported-cartridges)
+
+On an EasyFlash cartridge, program the image, enable the boot jumper and
+power on. RESET starts a fresh run and clears the recorded faults. The
+586220 harness enables the optional external port checks.
 
 For a simulated run, open the image in an emulator that supports EasyFlash.
 These examples use an EasyFlash-capable build of
