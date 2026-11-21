@@ -43,9 +43,11 @@ standard EasyFlash reset mapping. [EasyFlash Programmer’s Guide](https://skoe.
 ## Reading a run
 
 The left column reports measurements as they finish. Two dots mean pending.
-On the simulated board, the low RAM, address lines, color RAM, CIA timers
-and interrupt outputs, SID readbacks and VIC collision checks are visible by
-frame 25, about half a second. The ROM checks finish around 1.3 seconds and
+On the simulated board, the low RAM, CPU arithmetic and banking checks,
+address lines, color RAM, CIA timers, interrupt paths, SID readbacks and
+initial VIC collision checks are visible by frame 25, about half a second.
+The three checks above the RAM grid use `.` for pending, `+` for pass and
+`!` for a fault. The ROM checks finish around 1.3 seconds and
 the first full memory result appears by 8.4 seconds. Wall-clock time
 depends on the speed of the simulator.
 
@@ -81,7 +83,7 @@ The top row shows both keyboard shortcuts and their current settings.
 Press **S** to mute or restore sound and **A** to hide or show the animated
 sprites. Both start on after RESET. The keys work with the cartridge font
 and a working CIA1 keyboard path. The SID scope keeps sampling while muted,
-and the VIC runs its collision checks before animation controls take effect.
+and both VIC collision tests run with either animation setting.
 
 On a clean pass, the memory map briefly becomes a large SID scope. Its
 sixteen columns sample the actual OSC3 register. The eight hardware sprites
@@ -127,13 +129,17 @@ Video reporting also needs a functioning VIC output path.
 
 | Check | Operation |
 |---|---|
+| 6510 ALU | Binary ADC/SBC exercise carry and borrow across all eight bit positions, signed overflow, zero and sign. Rotate through carry in both directions. Packed-BCD addition and subtraction check decimal result and carry across nibble and byte boundaries. |
+| CPU memory map | From $0200, exercise all eight LORAM/HIRAM/CHAREN combinations twice. Drive each bit from $01, then hold its latch low and use the $00 direction register to release the high bits to the board pull-ups. Compare cartridge ROM with a DRAM marker beneath it. Two complementary writes distinguish the VIC register and its mirror, DRAM and the read-only character window. The separate CRC judges the character ROM contents. |
 | Address bus | Write 17 distinct tags at a base address and all sixteen single-bit neighbours, then read them back with cartridge, ROMs and I/O switched out. |
 | Deep RAM | First sweep writes a tag derived from both address bytes and a seed across $1000–$FFFF, verifies and inverts it in descending order, then verifies the inverse in ascending order. Subsequent passes alternate address patterns with a six-element March C− on this 60K. The low 4K holds the qualified workspace and display. |
 | Color RAM | Two full writes and separate verification reads of all 1,024 nibbles. The tag folds all ten address bits into four data bits. Only D0–D3 are compared. |
 | ROMs | CRC-16/CCITT-FALSE over the complete CPU-visible images. Stock BASIC is A512, character ROM F542 and KERNAL revision 3 304F. DIFF means a different signature. A legitimate replacement ROM can produce it. The dashboard starts with its cartridge font. Only a matching character ROM checksum enables copying stock glyphs to the same screen font RAM. The VIC can display every result with U5 removed. |
 | VIC-II | Bounded raster progress check. All eight sprites overlap each other and a solid background target. Repeat with alternating sprites enabled, check the read-to-clear latches, then separate the sprites and require the overlap to disappear. |
+| VIC raster IRQ | Wait for a raster match with VIC interrupts masked and the CPU accepting IRQs. Enable the pending source, require entry through the hardware vector, verify the source bits and acknowledge them. The CIA1 IRQ and CIA2 NMI tests run separately. |
+| VIC banks | Once the first deep sweep finishes, put a different pair of opaque sprites in each 16 KiB bank. Select the four banks with CIA2 and require sprite collision masks $03, $0C, $30 and $C0 respectively. The footer reports the VIC’s actual memory fetches. |
 | CIA1 and CIA2 | Timer A underflows clock timer B in one-shot mode. Check the source bits and read-to-clear behavior, then deliver actual timer interrupts to ROM IRQ and NMI handlers. Both time-of-day clocks must move. Raster and device waits are bounded. |
-| SID | Hold voice 3’s sawtooth with TEST, release it and require movement on OSC3. Gate the envelope and require ENV3 to rise and fall. The audible phrase exercises all three voices. Analog output, individual audio channels and filters require listening or probing. |
+| SID | Hold voice 3’s sawtooth at zero with TEST, run it into its upper half, then set its frequency to zero. Require OSC3 to hold the same nonzero value for 32 reads and return to zero when TEST is asserted again. Gate the envelope and require ENV3 to rise and fall. The audible phrase exercises all three voices. Analog output, individual audio channels and filters require listening or probing. |
 | 586220 harness | Look for mirrored user-port PB pairs in both directions. When detected, independently exercise keyboard and joystick paths using the motor-controlled switch, both paddle pairs through U28, IEC ATN-to-CLK transitions and the cassette SENSE-to-READ edge on CIA1 FLAG. |
 
 The March C− sequence is **write 0**, **up read 0 / write 1**, **up read 1 /
@@ -147,6 +153,49 @@ pairs produces BAD. When a loop is recognized, the strip shows individual
 KEY, JOY, POT, IEC and TAPE results with + for pass and ! for fail. Loss of
 all identifying pairs can look like an unplugged harness.
 
+## From repair symptoms to fault injection
+
+Commodore lists the 6510, PLA, VIC-II and DRAM among the possible causes
+of a blank screen. Its troubleshooting guide also points to U14 for some
+garbled displays and U26 for characters rendered as blocks. Repairer Ray
+Carlsen observed that a character-ROM fault can spoil the lettering while
+a cartridge still runs. Liotri uses
+its own font and measures the CPU and video address paths separately.
+[Commodore service manual](https://www.devili.iki.fi/Computers/Commodore/C64/Service_Manual/Page_14.html) · [Ray Carlsen’s repair notes](https://portcommodore.com/rcarlsen/cbm/c64/c64-ic.txt)
+
+The following are observed results on the simulated 250407. Component
+numbers and pin numbers refer to this board.
+
+| Injected fault | What Liotri showed |
+|---|---|
+| Open U7 pin 29 (LORAM), pin 28 (HIRAM) or pin 27 (CHAREN), one at a time | `BANK MAP FAILED` at $01=$36, $35 and $33 respectively. Holding CHAREN low instead failed at $37. The error screen still worked with I/O hidden. |
+| Make P0’s output driver stay enabled in a separate simulator build | The data-register sweep passed. Releasing P0 via the direction register produced `BANK MAP FAILED` at $00=$28. |
+| Open U17 pin 8 (PLA LORAM input) | The same $36 failure as an open LORAM output at U7. The report identifies a path to probe at both ends. |
+| Open U19 pin 8 (VIC IRQ output) | `VIC IRQ!` with VIC raster movement, CIA1 IRQ and CIA2 NMI all passing. |
+| Hold U7 pin 3 (shared IRQ input) high or low | Both VIC IRQ and CIA1 IRQ failed. CIA2 NMI still passed. Holding U7 pin 4 (NMI) high produced the complementary result. |
+| Hold U2 pin 2 (CIA2 PA0) high, or open U14 pin 2 | `VIC BANK BAD` with the ordinary eight-sprite collision test passing. The default video bank still displayed the dashboard. The previous cartridge reported a clean pass with U2 pin 2 held high. |
+| Remove U18 or hold its chip select (pin 8) high | `SID OSC/ENV BAD`. The held-phase check rejects bus activity from an empty or unselected SID socket. |
+| Disable BCD correction in the simulated CPU core | `ALU!` while banking, interrupts and the RAM sweep still ran. |
+| Suppress signed overflow on binary SBC in a separate core build | `ALU!` with `MAP+` and `VIC IRQ+`. These internal CPU faults are functional models. Their frequency on real 6510s is unknown. |
+
+A CPU bank failure halts the cartridge before deep writes can reach the
+wrong device. The screen gives the value written to $01 or $00 and the
+window that disagreed. A VIC bank failure leaves the CPU running its RAM
+sweeps. U7 drives the banking inputs to the PLA. CIA2 and U14 select the
+VIC’s DRAM bank.
+[The C64 PLA Dissected](https://skoe.de/docs/c64-dissected/pla/c64_pla_dissected_a4ds.pdf) · [Commodore Programmer’s Reference Guide, graphics](https://www.commodore.ca/manuals/c64_programmers_reference/c64-programmers_reference_guide-03-programming_graphics.pdf)
+
+To reproduce the video-bank fault on the supplied cartridge, run the following command.
+
+```sh
+c64-hw-sim --headless 465 --text --fault U2.2:vcc liotri.crt
+```
+
+A removed 6510 produced no cartridge report in the simulator. On a board
+that gives no report, clock, reset and instruction fetch need external
+measurement. The SID readbacks also leave the analog audio path to be
+checked at the output. [MOS 6581 register description](https://gryzor.info/imgs/9/9d/Mos_6581_sid.pdf)
+
 ## Build and verify
 
 To rebuild from source, run `make -B` in the repository root with GNU Make
@@ -154,8 +203,10 @@ and 64tass on your path. The release was assembled with 64tass
 1.60.3243. You can select another installation with
 `make -B TASS=/path/to/64tass`.
 
-The entry point is [src/liotri.asm](src/liotri.asm). It includes the font,
-sprite data and harness tests. The assembler emits the 64-byte CRT header,
+The assembly entry point includes the CPU probes, font, sprite data and
+harness tests. [src/liotri.asm](src/liotri.asm) · [src/cpu.asm](src/cpu.asm)
+
+The assembler emits the 64-byte CRT header,
 two 8 KiB EasyFlash CHIP packets, and the CPU vectors directly into
 `liotri.crt`. The cartridge contains its own repair font.
 
@@ -172,7 +223,11 @@ The suite reads the monitor output and flash reports. It exercises missing
 ROMs, interrupted data and address paths, SID and CIA failures, broken harness
 contacts, keyboard toggles, the clean-pass report, and a deliberately changed
 byte under I/O. With the character ROM removed, it decodes screenshots using
-the cartridge’s own glyphs.
+the cartridge’s own glyphs. For the optional arithmetic fault case, build
+a separate copy of the simulator with `.bcd_disabled = true` in the
+`m6502_desc_t` passed to `m6502_init` in `src/c64.c`. Set
+`C64_HW_SIM_NO_BCD` to that executable alongside the normal `C64_HW_SIM`.
+Both run the same cartridge image.
 
 ## License
 

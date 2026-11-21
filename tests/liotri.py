@@ -14,8 +14,8 @@ CART = ROOT / "liotri.crt"
 BIN = os.environ.get("C64_HW_SIM", "c64-hw-sim")
 
 
-def run(frames, *args, cart=CART, keys=""):
-    command = [BIN, "--headless", str(frames), "--text", *args, cart]
+def run(frames, *args, cart=CART, keys="", simulator=BIN):
+    command = [simulator, "--headless", str(frames), "--text", *args, cart]
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                           check=True, env={**os.environ, "C64HW_TYPE": keys}).stdout
 
@@ -32,7 +32,7 @@ def quick(work):
     shot = work / "quick.png"
     run(25, "--fault", "U5:removed", "--shot", shot)
     report, _ = repair_screen(shot)
-    expect(report, "S:SOUND ON", "A:SPRITES ON")
+    expect(report, "S:SOUND ON", "A:SPRITES ON", r"ALU\+ MAP\+ VIC IRQ\+")
     assert "CHECKS OK" not in report
     for label in ("LOW 4K", "ADDRESS BUS", "COLOR RAM", "VIC RASTER",
                   "CIA1 A/B", "CIA2 A/B", "CIA1 IRQ", "CIA2 NMI",
@@ -47,7 +47,7 @@ def healthy():
            "S:SOUND ON", "A:SPRITES ON")
     for label in ("CHAR ROM", "BASIC ROM", "KERNAL ROM", "CIA1 TOD", "CIA2 TOD"):
         expect(report, label + r" +OK")
-    expect(report, r"USER LOOP +OPEN")
+    expect(report, r"USER LOOP +OPEN", r"VIC BANK +OK")
 
 
 def march():
@@ -76,6 +76,56 @@ def interrupts():
     # The counters and ICR can pass with the physical interrupt outputs lifted.
     report = run(40, "--fault", "U1.21:open", "--fault", "U2.21:open")
     expect(report, r"CIA1 IRQ +BAD", r"CIA2 NMI +BAD", r"CIA1 A/B +OK", r"CIA2 A/B +OK")
+
+
+def banking(work):
+    # Open each U7 banking pin, then the same path at the PLA. An early FAIL
+    # must remain readable even when CHAREN is held low and I/O disappears.
+    for fault, setting, window in [
+        ("U7.29:open", "36", "8K CART / RAM"),
+        ("U7.28:open", "35", "8K CART / RAM"),
+        ("U7.27:open", "33", "VIC $D000/$D040"),
+        ("U7.27:gnd", "37", "VIC $D000/$D040"),
+        ("U17.8:open", "36", "8K CART / RAM"),
+    ]:
+        shot = work / f"bank-{fault.split(':')[0]}-{setting}.png"
+        run(25, "--fault", fault, "--shot", shot)
+        display, _ = repair_screen(shot)
+        expect(display, re.escape("BANK MAP FAILED  $01=$" + setting), re.escape(window),
+               "CHECK 6510 PORT / PLA / DECODE")
+
+
+def sid_socket():
+    for fault in ("U18:removed", "U18.8:vcc"):
+        report = run(58, "--fault", fault)
+        expect(report, r"SID OSC/ENV +BAD", r"VIC SPRITES +OK", r"ALU\+ MAP\+")
+
+
+def irq_routes():
+    for fault, vic, cia1, cia2 in [
+        ("U19.8:open", "!", "OK", "OK"),
+        ("U7.3:vcc", "!", "BAD", "OK"),
+        ("U7.3:gnd", "!", "BAD", "OK"),
+        ("U7.4:vcc", "+", "OK", "BAD"),
+    ]:
+        report = run(52, "--fault", fault)
+        expect(report, "VIC IRQ" + re.escape(vic), r"VIC RASTER +OK",
+               "CIA1 IRQ +" + cia1, "CIA2 NMI +" + cia2, r"CIA1 A/B +OK")
+
+
+def vic_banks():
+    for fault in ("U2.2:vcc", "U14.2:open"):
+        report = run(465, "--fault", fault)
+        expect(report, r"VIC BANK +BAD", r"VIC SPRITES +OK", r"VIC RASTER +OK",
+               r"CIA2 A/B +OK", r"MEMORY SWEEP +FAULT")
+        assert "CHECKS OK" not in report
+
+
+def decimal_disabled():
+    # Optional alternate CPU core. This is exactly the release cartridge.
+    report = run(465, simulator=os.environ["C64_HW_SIM_NO_BCD"])
+    expect(report, r"ALU! MAP\+ VIC IRQ\+", r"MEMORY SWEEP +FAULT", r"VIC BANK +OK")
+    assert "NO FAULTS FOUND" not in report
 
 
 def harness():
@@ -117,7 +167,7 @@ def repair_screen(path):
         return pixels[pos:pos+3]
 
     romh = CART.read_bytes()[-8192:]
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /$:"
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /$:=!+."
     glyphs = {romh[0x1000+8*(ord(ch) & 63):0x1008+8*(ord(ch) & 63)]: ch
               for ch in alphabet}
     bg = pixel(32, 36+4*8)
@@ -202,10 +252,12 @@ def mapper(work):
 def main():
     with tempfile.TemporaryDirectory(prefix="liotri-") as temp:
         work = Path(temp)
-        cases = [healthy, march, shortcuts, peripherals, interrupts, harness]
+        cases = [healthy, march, shortcuts, peripherals, interrupts, harness, irq_routes, vic_banks, sid_socket]
+        if os.environ.get("C64_HW_SIM_NO_BCD"):
+            cases.append(decimal_disabled)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             jobs = {pool.submit(case): case.__name__ for case in cases}
-            for case in [quick, flipped_byte, dead_ram, address_alias, missing_roms, mapper]:
+            for case in [quick, banking, flipped_byte, dead_ram, address_alias, missing_roms, mapper]:
                 jobs[pool.submit(case, work)] = case.__name__
             for job in concurrent.futures.as_completed(jobs):
                 job.result()

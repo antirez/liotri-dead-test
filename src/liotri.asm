@@ -60,9 +60,14 @@ addr_probe = $25
 keys_sample = $26
 keys_down = $27
 controls_off = $28      ; PB2 = animation disabled, PB5 = muted
+vic_irq_test_active = $29
+vic_seen = $2a
+vic_banks_done = $2b
+vic_bank_index = $2c
 anim_key = $04
 sound_key = $20
 run_status = screen+40+16
+bank_shape = $0200      ; boot-time bank probe can be reused after the first sweep
 sprite_shape = $0300
 flags = $0b00           ; sticky page flags in unused character slots 96..127
 map = screen + 3*40+21
@@ -72,8 +77,6 @@ meter = screen+23*40+2
 .cdef "AZ",1," ?",32,"@@",0
 
 start:
-    lda #$86            ; ROML stays at $8000 on both sides of the change
-    sta mode
     ldx #$ff
     txs
     lda #3
@@ -93,7 +96,7 @@ start:
     sta vic+$1b
     sta vic+$1c
     sta vic+$1d
-    ldx #controls_off-$02
+    ldx #vic_banks_done-$02
 -   sta $02,x
     dex
     bpl -
@@ -133,6 +136,12 @@ start:
     jsr verdict
     lda #$1b
     sta vic+$11
+    jsr cpu_alu
+    ldx #4
+    jsr quick_mark
+    jsr install_bank_probe
+    ldx #9
+    jsr quick_mark
     jsr install_kernel
     jsr address_test
     sta addr_bad
@@ -225,7 +234,11 @@ stage_done:
     lda stage
     cmp last_stage
     bne stage_loop
-    lda faults
+    lda vic_banks_done
+    bne +
+    inc vic_banks_done
+    jsr vic_banks
++   lda faults
     ora badbits
     beq clean_pass
     ldx #4
@@ -291,6 +304,24 @@ pass_message:
     #row "      RAM TESTS REPEAT UNTIL RESET"
     #row "      TO CATCH INTERMITTENT FAULTS."
 pass_message_end:
+
+; Three compact results share the page-map heading.
+quick_mark:
+    ldy #13
+    cmp #0
+    beq +
+    inc faults
+    lda #33
+    ldy #10
+    bne quick_ink
++   lda #43
+quick_ink:
+    sta screen+2*40,x
+    tya
+    sta color+2*40,x
+    rts
+
+.include "cpu.asm"
 
 ; Read all 1024 low nibbles. Fold each of A0..A9 into the test value.
 ; Separate complete writes and reads so a mutually aliased pair is exposed.
@@ -394,7 +425,9 @@ irq_test:
     lda #0
     sta irq_seen
     sta nmi_seen
-    .for base in [cia1,cia2]
+    ; Arm one source at a time. NMI can otherwise arrive during the
+    ; IRQ entry sequence and divert its vector on an NMOS 6510.
+    .for base,seen in [(cia1,irq_seen),(cia2,nmi_seen)]
     lda #$80
     sta base+14
     lda #0
@@ -406,17 +439,20 @@ irq_test:
     sta base+13
     lda #$99
     sta base+14
-    .endfor
+    .if base == cia1
     cli
+    .endif
     ldx #0
--   dex
+-   lda seen
+    bne +
+    dex
     bne -
-    sei
++   sei
     lda #$7f
-    sta cia1+13
-    sta cia2+13
-    lda cia1+13
-    lda cia2+13
+    sta base+13
+    lda base+13
+    .endfor
+    jsr raster_irq
     lda #$86
     sta mode
     lda irq_seen
@@ -428,6 +464,55 @@ irq_test:
     ldx #15
     jmp verdict
 
+; Enable just the VIC raster source. CIA masks are clear and Ultimax still
+; supplies the real hardware IRQ vector. Allow more than one PAL/NTSC frame.
+raster_irq:
+    lda #1
+    sta vic_irq_test_active
+    lda #48
+    sta vic+$12          ; compare bit 8 is zero in the $1b written to $d011
+    lda #1
+    sta vic+$19          ; discard any earlier masked raster match
+    cli                  ; a masked match must latch without delivering IRQ
+    ldy #32
+    ldx #0
+-   lda vic+$19
+    and #1
+    bne raster_latched
+    dex
+    bne -
+    dey
+    bne -
+    beq raster_failed
+raster_latched:
+    lda vic+$19
+    and #$81
+    cmp #1
+    bne raster_failed
+    lda vic_seen
+    bne raster_failed
+    lda #1              ; enabling a pending source must now reach the CPU
+    sta vic+$1a
+    ldx #64
+-   lda vic_seen
+    bne raster_finished
+    dex
+    bne -
+raster_failed:
+    lda #$ff
+    sta vic_seen
+raster_finished:
+    sei
+    lda #0
+    sta vic+$1a
+    sta vic_irq_test_active
+    lda #1
+    sta vic+$19
+    lda vic_seen
+    eor #$81
+    ldx #18
+    jmp quick_mark
+
 ; Test the two actual SID readbacks. The purely audible paths have a separate
 ; voice sequence. A held TEST resets the saw phase; gate makes ENV3 attack.
 sid_test:
@@ -438,26 +523,40 @@ sid_test:
     bpl -
     lda #$28
     sta sid+18
-    lda #$81
+    lda #$20             ; saw advances one OSC3 count per eight PHI2 clocks
     sta sid+15
     lda #$f0
     sta sid+20
-    lda sid+27
-    sta delta
-    lda #$21
-    sta sid+18
-    lda sid+27
-    sta tmp
+    jsr sid_zero
+    bne sid_bad
+    lda #$20
+    sta sid+18           ; release TEST with GATE still closed
     ldx #0
 -   lda sid+27
-    cmp tmp
-    bne +
+    bmi +
     dex
     bne -
-    inc delta
+    beq sid_bad
++   lda #0               ; zero frequency holds the phase reached above
+    sta sid+15
+    lda sid+27
+    bpl sid_bad
+    ldx #32
+-   cmp sid+27
+    bne sid_bad
+    dex
+    bne -
+    lda #$28
+    sta sid+18
+    jsr sid_zero         ; TEST must force the held nonzero value back to zero
+    bne sid_bad
+    lda #$81
+    sta sid+15
+    lda #$21
+    sta sid+18
     ; An original SID can wait for its 15-bit ADSR counter to wrap
     ; after a rate change. Exit immediately on success, allow that wrap.
-+   ldy #24
+    ldy #24
 -   ldx #0
 -   lda sid+28
     cmp #16
@@ -466,7 +565,7 @@ sid_test:
     bne -
     dey
     bne --
-    inc delta
+    beq sid_bad
 attack_seen:
     sta tmp
     lda #$20
@@ -480,9 +579,22 @@ attack_seen:
     bne -
     dey
     bne --
-    inc delta
+    beq sid_bad
 released:
-    lda delta
+    lda #0
+    rts
+sid_bad:
+    lda #$20
+    sta sid+18
+    lda #1
+    rts
+sid_zero:
+    ldx #32
+    lda #0
+-   ora sid+27
+    dex
+    bne -
+    cmp #0
     rts
 
 ; A bounded frame wait also keeps a faulty raster from hanging the panel.
@@ -557,15 +669,7 @@ sprites_test:
     eor #$55
     ora delta
     sta delta
-    ldx #7
--   txa
-    and #3
-    clc
-    adc #sprite_shape/64
-    sta screen+1016,x
-    dex
-    bpl -
-    jsr position_sprites
+    jsr restore_sprite_positions
     lda #$ff
     sta vic+$15
     jsr frame
@@ -580,6 +684,70 @@ sprites_test:
     sta sid+24
     pla
     rts
+
+; The first sweep has exercised the DRAM behind all four VIC banks. Give
+; each bank a different pair of opaque sprites. The collision latch tells
+; the CPU which bank the VIC actually fetched, independently of CIA readback.
+vic_banks:
+    jsr prepare_vic_banks
+    lda #$0b
+    sta vic+$11          ; blank text while the other banks are selected
+    ldx #14
+-   lda #160
+    sta vic,x
+    lda #128
+    sta vic+1,x
+    dex
+    dex
+    bpl -
+    lda #0
+    sta vic+$10
+    sta vic_bank_index
+    sta delta
+    lda #$ff
+    sta vic+$15
+    jsr frame
+-   ldx vic_bank_index
+    txa
+    eor #3
+    sta cia2
+    lda vic+$1e          ; clear the previous frame's collisions
+    jsr frame
+    ldx vic_bank_index
+    lda vic+$1e
+    eor bank_pairs,x
+    ora delta
+    sta delta
+    inc vic_bank_index
+    cpx #3
+    bne -
+    lda #3
+    sta cia2
+    lda #0
+    sta vic+$15
+    jsr restore_sprite_positions
+    lda controls_off
+    and #anim_key
+    bne +
+    lda #$ff
+    sta vic+$15
++   lda #$1b
+    sta vic+$11
+    ldx #16
+    lda delta
+    jmp verdict
+bank_pairs: .byte $03,$0c,$30,$c0
+
+restore_sprite_positions:
+    ldx #7
+-   txa
+    and #3
+    clc
+    adc #sprite_shape/64
+    sta screen+1016,x
+    dex
+    bpl -
+    jmp position_sprites
 
 ; A passive 586220 user-port dongle connects PB0..3 to PB4..7.
 ; Drive only one zero at a time (the other pins are inputs), in both
@@ -891,6 +1059,30 @@ march_up:
 +   iny
     bne march_up
     jmp normal_map
+prepare_vic_banks:
+    jsr all_ram
+    ldx #63
+-   .for offset,value in [(0,$ff),(64,0)]
+    lda #value
+    .for bank in range(4)
+    sta bank*$4000+bank_shape+offset,x
+    .endfor
+    .endfor
+    dex
+    bpl -
+    ldx #7
+    lda #bank_shape/64+1
+-   .for bank in range(4)
+    sta bank*$4000+screen+1016,x
+    .endfor
+    dex
+    bpl -
+    lda #bank_shape/64
+    .for bank in range(4)
+    sta bank*$4000+screen+1016+2*bank
+    sta bank*$4000+screen+1017+2*bank
+    .endfor
+    jmp normal_map
 .cerror * > $1000, "RAM kernel exceeds its qualified pages"
 .here
 
@@ -912,7 +1104,7 @@ digit:
     sta screen+24*40,y
     rts
 hex: .text "0123456789ABCDEF"
-hex_pos: .byte 7,8, 19,20, 21,22, 32,33
+hex_pos: .byte 5,6, 15,16, 17,18, 25,26
 
 ; Re-arm the page map for the next sweep. Faults retain their red cross.
 reset_map:
@@ -1126,9 +1318,11 @@ result_ink: .byte 13,13,13,13, 10,10,10,10, 7,7,7,7, 12,12,12,12
 result_lo: .for i in range(16)
     .byte <(status+i*40)
     .endfor
+    .byte <(screen+24*40+37)
 result_hi: .for i in range(16)
     .byte >(status+i*40)
     .endfor
+    .byte >(screen+24*40+37)
 
 stage_name:
     txa
@@ -1507,7 +1701,7 @@ sprite_field = screen+(*-layout)
     .text "ON "
     .cerror *-layout != 40, "shortcut bar must fill the first row"
     #row "  MEMORY SWEEP             STARTUP"
-    #row "  DEVICE      TEST   0123456789ABCDEF"
+    #row " ALU. MAP. VIC IRQ.  0123456789ABCDEF"
     #row "  LOW 4K      ..   0 OOOOOOOOOOOOOOOO"
     #row "  COLOR RAM   ..   1 ................"
     #row "  VIC RASTER  ..   2 ................"
@@ -1529,7 +1723,7 @@ sprite_field = screen+(*-layout)
     #row ""
     #row ""
     #row ""
-    #row "  PASS --   FIRST $----    BITS --"
+    #row "PASS -- FIRST $---- BITS -- VIC BANK .."
     .fill 24,32
 
 .include "font.asm"
@@ -1720,9 +1914,27 @@ irq_entry:
     pha
     txa
     pha
+    lda vic_irq_test_active
+    beq cia_irq_entry
+    lda vic+$19
+    and #$81
+    cmp #$81
+    bne unexpected_irq
+    sta vic_seen
+    lda #1
+    sta vic+$19
+    lda vic+$19
+    and #$81
+    beq mask_irq_return
+unexpected_irq:
+    lda #$ff            ; unsolicited interrupt or failed acknowledge
+    sta vic_seen
+    bne mask_irq_return
+cia_irq_entry:
     lda cia1+13
     and #$81
     sta irq_seen
+mask_irq_return:
     tsx
     lda $0103,x
     ora #4
