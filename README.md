@@ -5,6 +5,13 @@ with all three system ROMs missing and checks the low 4K of RAM before its
 first subroutine call. When RAM or an address multiplexer fails, the VIC can
 read both the fault message and its font directly from the cartridge.
 
+We developed Liotri with c64-hw-simulator, a C64 hardware emulator that let
+us inject faults into a simulated PAL board (ASSY 250407) and verify the
+cartridge’s diagnosis. Removing DRAM chips U24 and U21 made Liotri highlight
+D6 and D0 on screen and flash twice for D6. Disconnecting CIA1’s IRQ pin
+left its timer check at OK while its interrupt check reported BAD.
+[c64-hw-simulator](https://github.com/antirez/c64-hw-simulator)
+
 On a healthy machine the dashboard shows the quick checks first, then maps
 the RAM sweep one page at a time. After a clean pass, the eight test sprites
 orbit a live trace of SID voice 3 while the SID plays a three-voice tune.
@@ -63,6 +70,18 @@ page marks survive subsequent passes. After a sparse address-bus failure, the ca
 finishes the quick checks, inhibits the deep writes, and switches to a second
 ROM-backed screen. Nine flashes identify this case. The highlighted address
 is the first conflicting probe, or the base if the returned tag was invalid.
+
+When the first full RAM pass finishes without a recorded fault, the
+dashboard shows **NO FAULTS FOUND** and explains that RAM tests repeat
+until RESET to catch intermittent faults. **CHECKS OK** stays visible during
+subsequent sweeps. A later mismatch immediately changes it to **RAM FAULT**
+and records the address and differing bits.
+
+The top row shows both keyboard shortcuts and their current settings.
+Press **S** to mute or restore sound and **A** to hide or show the animated
+sprites. Both start on after RESET. The keys work with the cartridge font
+and a working CIA1 keyboard path. The SID scope keeps sampling while muted,
+and the VIC runs its collision checks before animation controls take effect.
 
 On a clean pass, the memory map briefly becomes a large SID scope. Its
 sixteen columns sample the actual OSC3 register. The eight hardware sprites
@@ -151,8 +170,9 @@ C64_HW_SIM=/path/to/c64-hw-sim python3 tests/liotri.py
 
 The suite reads the monitor output and flash reports. It exercises missing
 ROMs, interrupted data and address paths, SID and CIA failures, broken harness
-contacts, and a deliberately changed byte under I/O. With the character ROM
-removed, it decodes screenshots using the cartridge’s own glyphs.
+contacts, keyboard toggles, the clean-pass report, and a deliberately changed
+byte under I/O. With the character ROM removed, it decodes screenshots using
+the cartridge’s own glyphs.
 
 ## License
 

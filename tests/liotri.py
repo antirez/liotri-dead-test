@@ -14,10 +14,10 @@ CART = ROOT / "liotri.crt"
 BIN = os.environ.get("C64_HW_SIM", "c64-hw-sim")
 
 
-def run(frames, *args, cart=CART):
+def run(frames, *args, cart=CART, keys=""):
     command = [BIN, "--headless", str(frames), "--text", *args, cart]
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
-                          check=True).stdout
+                          check=True, env={**os.environ, "C64HW_TYPE": keys}).stdout
 
 
 def expect(report, *patterns):
@@ -32,6 +32,8 @@ def quick(work):
     shot = work / "quick.png"
     run(25, "--fault", "U5:removed", "--shot", shot)
     report, _ = repair_screen(shot)
+    expect(report, "S:SOUND ON", "A:SPRITES ON")
+    assert "CHECKS OK" not in report
     for label in ("LOW 4K", "ADDRESS BUS", "COLOR RAM", "VIC RASTER",
                   "CIA1 A/B", "CIA2 A/B", "CIA1 IRQ", "CIA2 NMI",
                   "SID OSC/ENV", "VIC SPRITES"):
@@ -40,7 +42,9 @@ def quick(work):
 
 def healthy():
     report = run(480)
-    expect(report, r"SID / OSC3 +PASS", r"PASS 01 +FIRST \$---- +BITS --")
+    expect(report, r"SID / OSC3 +CHECKS OK +PASS", r"PASS 01 +FIRST \$---- +BITS --",
+           "NO FAULTS FOUND", "RAM TESTS REPEAT UNTIL RESET", "TO CATCH INTERMITTENT FAULTS",
+           "S:SOUND ON", "A:SPRITES ON")
     for label in ("CHAR ROM", "BASIC ROM", "KERNAL ROM", "CIA1 TOD", "CIA2 TOD"):
         expect(report, label + r" +OK")
     expect(report, r"USER LOOP +OPEN")
@@ -48,8 +52,17 @@ def healthy():
 
 def march():
     # A third pass requires completing both the address and March C- sweeps.
-    report = run(1500)
-    expect(report, r"PASS 03 +FIRST \$---- +BITS --")
+    report = run(1500, keys="sa")
+    expect(report, r"PASS 03 +FIRST \$---- +BITS --", r"MEMORY SWEEP +CHECKS OK",
+           "S:SOUND OFF", "A:SPRITES OFF")
+
+
+def shortcuts():
+    # Pressing S twice must unmute even if A was pressed between the two.
+    report = run(205, keys="sas")
+    expect(report, "S:SOUND ON ", "A:SPRITES OFF", r"VIC SPRITES +OK", r"SID OSC/ENV +OK")
+    report = run(480, keys="saa")
+    expect(report, "S:SOUND OFF", "A:SPRITES ON", "NO FAULTS FOUND")
 
 
 def peripherals():
@@ -78,7 +91,9 @@ def flipped_byte(work):
     # $d34a should contain $d3 XOR $4a XOR $5a. Flip exactly D2 and D0.
     prg = work / "retention.prg"
     prg.write_bytes(bytes([0x4a, 0xd3, 0xd3 ^ 0x4a ^ 0x5a ^ 5]))
-    expect(run(440, prg), r"FIRST \$D34A +BITS 05", r"MEMORY SWEEP +FAULT")
+    report = run(440, prg)
+    expect(report, r"FIRST \$D34A +BITS 05", r"MEMORY SWEEP +RAM FAULT +FAULT")
+    assert "NO FAULTS FOUND" not in report and "CHECKS OK" not in report
 
 
 def repair_screen(path):
@@ -102,7 +117,7 @@ def repair_screen(path):
         return pixels[pos:pos+3]
 
     romh = CART.read_bytes()[-8192:]
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /$"
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /$:"
     glyphs = {romh[0x1000+8*(ord(ch) & 63):0x1008+8*(ord(ch) & 63)]: ch
               for ch in alphabet}
     bg = pixel(32, 36+4*8)
@@ -119,7 +134,10 @@ def repair_screen(path):
                     if ink != bg:
                         colors.add(ink)
                 glyph.append(bits)
-            line.append(glyphs.get(bytes(glyph), "?"))
+            # The dashboard shortcut bar uses reverse video.
+            normal = bytes(glyph)
+            inverse = bytes(value ^ 255 for value in glyph)
+            line.append(glyphs.get(normal, glyphs.get(inverse, "?")))
         rows.append("".join(line))
         inks.append(colors)
     return "\n".join(rows), inks
@@ -147,11 +165,13 @@ def address_alias(work):
 
 def missing_roms(work):
     shot = work / "roms.png"
-    run(160, "--fault", "U3:removed", "--fault", "U4:removed", "--fault", "U5:removed",
-        "--shot", shot)
+    run(440, "--fault", "U3:removed", "--fault", "U4:removed", "--fault", "U5:removed",
+        "--shot", shot, keys="sa")
     text, _ = repair_screen(shot)
     expect(text, r"CHAR ROM +DIFF", r"BASIC ROM +DIFF", r"KERNAL ROM +DIFF",
-           r"VIC SPRITES +OK", r"PASS 01")
+           r"VIC SPRITES +OK", r"PASS 01", r"MEMORY SWEEP +FAULT",
+           "S:SOUND OFF", "A:SPRITES OFF")
+    assert "NO FAULTS FOUND" not in text and "CHECKS OK" not in text
 
 
 def mapper(work):
@@ -182,7 +202,7 @@ def mapper(work):
 def main():
     with tempfile.TemporaryDirectory(prefix="liotri-") as temp:
         work = Path(temp)
-        cases = [healthy, march, peripherals, interrupts, harness]
+        cases = [healthy, march, shortcuts, peripherals, interrupts, harness]
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             jobs = {pool.submit(case): case.__name__ for case in cases}
             for case in [quick, flipped_byte, dead_ram, address_alias, missing_roms, mapper]:

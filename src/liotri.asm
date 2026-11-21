@@ -57,6 +57,12 @@ show_orbit = $22
 march_value = $23
 harness_found = $24
 addr_probe = $25
+keys_sample = $26
+keys_down = $27
+controls_off = $28      ; PB2 = animation disabled, PB5 = muted
+anim_key = $04
+sound_key = $20
+run_status = screen+40+16
 sprite_shape = $0300
 flags = $0b00           ; sticky page flags in unused character slots 96..127
 map = screen + 3*40+21
@@ -87,7 +93,7 @@ start:
     sta vic+$1b
     sta vic+$1c
     sta vic+$1d
-    ldx #harness_found-$02
+    ldx #controls_off-$02
 -   sta $02,x
     dex
     bpl -
@@ -153,7 +159,11 @@ start:
     lda harness_found
     beq +
     jsr accessories
-+   jsr roms
++   lda #0              ; hand CIA1 ports over to the keyboard after harness tests
+    sta cia1+2
+    sta cia1+3
+    sta cia1             ; only PA1 will be driven, and only during a scan
+    jsr roms
     ; If an alias affects the VIC's RAM fetches the panel itself can be
     ; unreadable. Switch both its matrix and its font to cartridge ROM.
     lda addr_bad
@@ -217,36 +227,70 @@ stage_done:
     bne stage_loop
     lda faults
     ora badbits
-    beq +
+    beq clean_pass
     ldx #4
-    bne show_done
-+   ldx #5
-show_done:
     jsr stage_name
     lda #100
-    sta hold
-summary_frame:
-    lda hold
-    cmp #76
-    bne +
-    lda faults
-    ora badbits
-    bne +
+    jsr hold_map
+    jmp next_pass
+clean_pass:
+    ldx #8
+-   lda clean_label,x
+    sta run_status,x
+    lda #13
+    sta color+(run_status-screen),x
+    dex
+    bpl -
+    ldx #5
+    jsr stage_name
+    lda #24              ; show the final RAM tiles before painting the scope
+    jsr hold_map
     inc show_orbit
     jsr scope_colors
+    ldx #pass_message_end-pass_message-1
+-   lda pass_message,x
+    sta screen+20*40,x
+    dex
+    bpl -
     ldx #12
 -   lda scope_title,x
     sta screen+42,x
     dex
     bpl -
-+   jsr instruments
-    lda show_orbit
-    beq +
+    lda #76
+    ldx pass
+    cpx #1              ; give the operator more reading time on the first pass
+    bne +
+    lda #176
++   sta hold
+scope_frame:
+    jsr instruments
     jsr scope_map
-+   jsr frame
+    jsr frame
     dec hold
-    bne summary_frame
+    bne scope_frame
+    ldx #pass_message_end-pass_message-1
+    lda #32
+-   sta screen+20*40,x
+    dex
+    bpl -
     jmp next_pass
+
+hold_map:
+    sta hold
+-   jsr instruments
+    jsr frame
+    dec hold
+    bne -
+    rts
+
+clean_label: .text "CHECKS OK"
+fault_label: .text "RAM FAULT"
+pass_message:
+    #row "            NO FAULTS FOUND."
+    #row "      RAM TESTS REPEAT UNTIL RESET"
+    #row "      TO CATCH INTERMITTENT FAULTS."
+pass_message_end:
 
 ; Read all 1024 low nibbles. Fold each of A0..A9 into the test value.
 ; Separate complete writes and reads so a mutually aliased pair is exposed.
@@ -587,6 +631,7 @@ rom_loop:
     lda #$ff
     sta crc
     sta crc+1
+crc_page:
     lda rom_port,x
     sta $01
     ldy #0
@@ -603,12 +648,13 @@ rom_loop:
     iny
     bne -
     inc page
+    lda #$37             ; the character ROM can cover CIA1 during the CRC
+    sta $01
+    jsr read_keys
     ldx rom_index
     lda page
     cmp rom_end,x
-    bne -
-    lda #$37
-    sta $01
+    bne crc_page
     lda crc
     cmp good_lo,x
     bne rom_diff
@@ -931,6 +977,13 @@ tile_ink:
     sta (map_ptr),y
     lda delta
     beq +
+    ldx #8
+-   lda fault_label,x
+    sta run_status,x
+    lda #10
+    sta color+(run_status-screen),x
+    dex
+    bpl -
     ldx #2
     lda firsthi
     jsr hexbyte
@@ -1129,9 +1182,73 @@ tod_done:
 tod_return:
     rts
 
+; Release all columns between scans. Ignore rows already grounded by a
+; joystick or a short. Accept a change after two equal samples, then
+; toggle only on the press edge so a held key cannot auto-repeat.
+read_keys:
+    lda cia1+1
+    sta tmp
+    ldx #2
+    stx cia1+2
+    nop
+    lda cia1+1
+    ldx #0
+    stx cia1+2
+    eor #$ff
+    and tmp
+    and #anim_key|sound_key
+    cmp keys_sample
+    sta keys_sample
+    bne keys_done
+    tay
+    eor keys_down
+    sty keys_down
+    and keys_down
+    beq keys_done
+    eor controls_off
+    sta controls_off
+
+    ; The SID oscillators keep running at zero volume for the scope.
+    and #sound_key
+    beq sound_on
+    lda #0
+    ldx #3
+    bne set_volume
+sound_on:
+    lda #12
+    ldx #0
+set_volume:
+    sta sid+24
+    ldy #sound_field-screen
+    jsr switch_label
+    lda controls_off
+    and #anim_key
+    beq sprites_on
+    lda #0
+    ldx #3
+    bne set_sprites
+sprites_on:
+    lda #$ff
+    ldx #0
+set_sprites:
+    sta vic+$15
+    ldy #sprite_field-screen
+switch_label:
+    .for k in range(3)
+    lda switch_text+k,x
+    sta screen+k,y
+    .endfor
+keys_done:
+    rts
+switch_text: .text "ON OFF" ^ $80  ; reverse video, like the dashboard title
+
 instruments:
+    jsr read_keys
     jsr poll_tod
     inc phase
+    lda controls_off
+    and #anim_key
+    bne play_score
     lda phase
     and #3
     bne +
@@ -1383,7 +1500,12 @@ row .macro s
     .fill 40-len(\s),32
 .endmacro
 layout:
-    #row "  LIOTRI C64 HARDWARE TEST"
+    .text " LIOTRI C64   S:SOUND "
+sound_field = screen+(*-layout)
+    .text "ON   A:SPRITES "
+sprite_field = screen+(*-layout)
+    .text "ON "
+    .cerror *-layout != 40, "shortcut bar must fill the first row"
     #row "  MEMORY SWEEP             STARTUP"
     #row "  DEVICE      TEST   0123456789ABCDEF"
     #row "  LOW 4K      ..   0 OOOOOOOOOOOOOOOO"
