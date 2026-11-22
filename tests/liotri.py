@@ -32,7 +32,7 @@ def quick(work):
     shot = work / "quick.png"
     run(25, "--fault", "U5:removed", "--shot", shot)
     report, _ = repair_screen(shot)
-    expect(report, "S:SOUND ON", "A:SPRITES ON", r"ALU\+ MAP\+ VIC IRQ\+")
+    expect(report, "S:SND ON", "A:SPR ON", "H:VOICE 0", r"ALU\+ MAP\+ VIC IRQ\+")
     assert "CHECKS OK" not in report
     for label in ("LOW 4K", "ADDRESS BUS", "COLOR RAM", "VIC RASTER",
                   "CIA1 A/B", "CIA2 A/B", "CIA1 IRQ", "CIA2 NMI",
@@ -44,7 +44,7 @@ def healthy():
     report = run(480)
     expect(report, r"SID / OSC3 +CHECKS OK +PASS", r"PASS 01 +FIRST \$---- +BITS --",
            "NO FAULTS FOUND", "RAM TESTS REPEAT UNTIL RESET", "TO CATCH INTERMITTENT FAULTS",
-           "S:SOUND ON", "A:SPRITES ON")
+           "S:SND ON", "A:SPR ON", "H:VOICE 0")
     for label in ("CHAR ROM", "BASIC ROM", "KERNAL ROM", "CIA1 TOD", "CIA2 TOD"):
         expect(report, label + r" +OK")
     expect(report, r"USER LOOP +OPEN", r"VIC BANK +OK")
@@ -54,15 +54,23 @@ def march():
     # A third pass requires completing both the address and March C- sweeps.
     report = run(1500, keys="sa")
     expect(report, r"PASS 03 +FIRST \$---- +BITS --", r"MEMORY SWEEP +CHECKS OK",
-           "S:SOUND OFF", "A:SPRITES OFF")
+           "S:SND OFF", "A:SPR OFF")
 
 
 def shortcuts():
     # Pressing S twice must unmute even if A was pressed between the two.
     report = run(205, keys="sas")
-    expect(report, "S:SOUND ON ", "A:SPRITES OFF", r"VIC SPRITES +OK", r"SID OSC/ENV +OK")
+    expect(report, "S:SND ON", "A:SPR OFF", r"VIC SPRITES +OK", r"SID OSC/ENV +OK")
     report = run(480, keys="saa")
-    expect(report, "S:SOUND OFF", "A:SPRITES ON", "NO FAULTS FOUND")
+    expect(report, "S:SND OFF", "A:SPR ON", "NO FAULTS FOUND")
+
+
+def voice_shortcut():
+    # H selects voice 1, then 2, then 3, then voice 0 (all voices).
+    report = run(205, keys="hhh")
+    expect(report, "S:SND ON", "H:VOICE 3", r"SID OSC/ENV +OK")
+    report = run(205, keys="hhhh")
+    expect(report, "S:SND ON", "H:VOICE 0", r"SID OSC/ENV +OK")
 
 
 def peripherals():
@@ -220,7 +228,7 @@ def missing_roms(work):
     text, _ = repair_screen(shot)
     expect(text, r"CHAR ROM +DIFF", r"BASIC ROM +DIFF", r"KERNAL ROM +DIFF",
            r"VIC SPRITES +OK", r"PASS 01", r"MEMORY SWEEP +FAULT",
-           "S:SOUND OFF", "A:SPRITES OFF")
+           "S:SND OFF", "A:SPR OFF")
     assert "NO FAULTS FOUND" not in text and "CHECKS OK" not in text
 
 
@@ -252,7 +260,7 @@ def mapper(work):
 def main():
     with tempfile.TemporaryDirectory(prefix="liotri-") as temp:
         work = Path(temp)
-        cases = [healthy, march, shortcuts, peripherals, interrupts, harness, irq_routes, vic_banks, sid_socket]
+        cases = [healthy, march, shortcuts, voice_shortcut, peripherals, interrupts, harness, irq_routes, vic_banks, sid_socket]
         if os.environ.get("C64_HW_SIM_NO_BCD"):
             cases.append(decimal_disabled)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:

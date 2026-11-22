@@ -1,0 +1,9 @@
+misc/
+c64-llm
+sid-keys
+*.dSYM/
+tests/vic-timing
+tests/cpu-timing
+tests/audio-macos
+tests/sid
+tests/basic
