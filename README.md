@@ -100,9 +100,11 @@ both VIC collision tests run with either animation setting.
 Press **K** to pause for the keyboard-matrix test. Unplug both joysticks,
 release K, then press and release each labeled key. Gray means untested,
 green means currently held, and blue means previously detected and now
-released. LSH/RSH identify the two Shift keys; CTL, CBM and STP mean Control,
-Commodore and RUN/STOP. Hold RUN/STOP and RETURN together for two seconds to
-exit. The dashboard and recorded results are restored, and a fresh RAM pass
+released. LSH/RSH identify the two Shift keys, SHLK is Shift Lock, and
+CTRL, CMD and STP mean Control, Commodore and RUN/STOP. The two C labels
+beside RSH are the down/up and right/left cursor keys. Hold RUN/STOP and
+RETURN together for two seconds to exit. The dashboard and recorded results
+are restored, and a fresh RAM pass
 begins because the screen backup uses memory covered by the sweep.
 RESTORE uses NMI and is not included in this matrix test. RUN/STOP + RESTORE
 returns safely to the running cartridge; it does not invoke the stock KERNAL

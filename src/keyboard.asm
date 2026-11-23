@@ -7,6 +7,9 @@ kb_exit = $36
 kb_clock = $37
 kb_seen = $38
 kb_live = $40
+kb_ptr = $48
+kb_paint = $4a
+kb_bit = $4b
 
 keyboard_entry:
     lda #$10
@@ -59,9 +62,8 @@ kb_save:
 -   lda kb_labels,x
     sta screen+5*40,x
     inx
+    cpx #kb_labels_end-kb_labels
     bne -
-    lda #$86
-    sta mode
     ; Opening K must be released before testing starts.
 kb_release:
     jsr kb_scan
@@ -87,33 +89,25 @@ kb_draw_row:
     asl
     asl
     asl
-    asl
-    asl
     sta kb_col
     ldy #0
 kb_draw_key:
+    sty kb_bit
     lda #11
-    pha
+    sta kb_paint
     lda kb_seen,x
     and bits,y
     beq +
-    pla
     lda #14
-    pha
+    sta kb_paint
 +   lda kb_bits
     and bits,y
     beq +
-    pla
     lda #5
-    pha
-+   pla
-    ldx kb_col
-    sta color+5*40,x
-    sta color+5*40+1,x
-    sta color+5*40+2,x
-    inc kb_col
-    inc kb_col
-    inc kb_col
+    sta kb_paint
++   ldx kb_col
+    jsr kb_paint_key
+    ldy kb_bit
     inc kb_col
     ldx kb_row
     iny
@@ -159,6 +153,8 @@ kb_scan:
     bne -
     rts
 kb_close:
+    lda #$86
+    sta mode
     ldx #0
 -   .for k in range(4)
     lda $1000+256*k,x
