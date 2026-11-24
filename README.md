@@ -67,6 +67,13 @@ qualified on startup.
 | Solid square | Final read completed |
 | Red cross | A read from this page differed on this or an earlier pass |
 
+The last dashboard row summarizes the long-running tests. `PASS` is the RAM
+sweep number. `FIRST` is the first failing RAM address, or `$----` if none has
+been recorded. `BITS` is the accumulated mask of differing data bits, or `--`
+before any failure. `VIC BANK` reports the four-bank VIC-II fetch test: `..`
+means pending, `OK` means all four banks produced their expected collision
+masks, and `BAD` means at least one bank did not.
+
 `FIRST` holds the first failing address from a deep sweep. `BITS` accumulates
 the XOR of expected and observed data with a bitwise OR over all failures.
 For example, `FIRST $D34A   BITS 05` means the first mismatch occurred at
@@ -82,11 +89,32 @@ until RESET to catch intermittent faults. **CHECKS OK** stays visible during
 subsequent sweeps. A later mismatch immediately changes it to **RAM FAULT**
 and records the address and differing bits.
 
-The top row shows both keyboard shortcuts and their current settings.
+The top row shows the keyboard shortcuts and their current settings.
 Press **S** to mute or restore sound and **A** to hide or show the animated
-sprites. Both start on after RESET. The keys work with the cartridge font
-and a working CIA1 keyboard path. The SID scope keeps sampling while muted,
-and both VIC collision tests run with either animation setting.
+sprites. Both start on after RESET. `H:VOICE 0` plays all three SID voices.
+Press **H** to solo voice 1; each further press selects voice 2, voice 3,
+then voice 0 again. The `H:VOICE` field shows the selected channel. The keys work with the cartridge font and
+a working CIA1 keyboard path. The SID scope keeps sampling while muted, and
+both VIC collision tests run with either animation setting.
+
+Press **K** to pause for the keyboard-matrix test. Unplug both joysticks,
+release K, then press and release each labeled key. Gray means untested,
+green means currently held, and blue means previously detected and now
+released. LSH/RSH identify the two Shift keys, SHLK is Shift Lock, and
+CTRL, CMD and STP mean Control, Commodore and RUN/STOP. The two C labels
+beside RSH are the down/up and right/left cursor keys. Hold RUN/STOP and
+RETURN together for two seconds to exit. The dashboard and recorded results
+are restored, and a fresh RAM pass
+begins because the screen backup uses memory covered by the sweep.
+RESTORE uses NMI and is not included in this matrix test. RUN/STOP + RESTORE
+returns safely to the running cartridge; it does not invoke the stock KERNAL
+BASIC warm start.
+
+Either joystick port controls hardware sprite 3 on the dashboard. Directions
+move it within the visible area, including diagonals. Holding Fire on either
+port turns it red; releasing Fire restores its white color. After ten seconds
+without direction or Fire input, it rejoins the dashboard animation. Sprites must be
+enabled with **A** to see it.
 
 On a clean pass, the memory map briefly becomes a large SID scope. Its
 sixteen columns sample the actual OSC3 register. The eight hardware sprites
@@ -142,7 +170,7 @@ Video reporting also needs a functioning VIC output path.
 | VIC raster IRQ | Wait for a raster match with VIC interrupts masked and the CPU accepting IRQs. Enable the pending source, require entry through the hardware vector, verify the source bits and acknowledge them. The CIA1 IRQ and CIA2 NMI tests run separately. |
 | VIC banks | Once the first deep sweep finishes, put a different pair of opaque sprites in each 16 KiB bank. Select the four banks with CIA2 and require sprite collision masks $03, $0C, $30 and $C0 respectively. The footer reports the VIC’s actual memory fetches. |
 | CIA1 and CIA2 | Timer A underflows clock timer B in one-shot mode. Check the source bits and read-to-clear behavior, then deliver actual timer interrupts to ROM IRQ and NMI handlers. Both time-of-day clocks must move. Raster and device waits are bounded. |
-| SID | Hold voice 3’s sawtooth at zero with TEST, run it into its upper half, then set its frequency to zero. Require OSC3 to hold the same nonzero value for 32 reads and return to zero when TEST is asserted again. Gate the envelope and require ENV3 to rise and fall. The audible phrase exercises all three voices. Analog output, individual audio channels and filters require listening or probing. |
+| SID | Hold voice 3’s sawtooth at zero with TEST, run it into its upper half, then set its frequency to zero. Require OSC3 to hold the same nonzero value for 32 reads and return to zero when TEST is asserted again. Gate the envelope and require ENV3 to rise and fall. The audible phrase exercises all three voices; `H:VOICE 0` plays them together and **H** selects each channel alone. Analog output and filters require listening or probing. |
 | 586220 harness | Look for mirrored user-port PB pairs in both directions. When detected, independently exercise keyboard and joystick paths using the motor-controlled switch, both paddle pairs through U28, IEC ATN-to-CLK transitions and the cassette SENSE-to-READ edge on CIA1 FLAG. |
 
 The March C− sequence is **write 0**, **up read 0 / write 1**, **up read 1 /

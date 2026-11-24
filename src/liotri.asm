@@ -64,8 +64,15 @@ vic_irq_test_active = $29
 vic_seen = $2a
 vic_banks_done = $2b
 vic_bank_index = $2c
+voice_index = $2d        ; 0 = all voices, 1..3 = solo voice
+joy_x = $2e
+joy_y = $2f
+joy_timeout = $30       ; remaining tenths of a second, zero = animation
+joy_tod = $31
+joy_x_hi = $32         ; ninth X bit: visible sprite origin ranges 24..320
 anim_key = $04
 sound_key = $20
+voice_key = $40
 run_status = screen+40+16
 bank_shape = $0200      ; boot-time bank probe can be reused after the first sweep
 sprite_shape = $0300
@@ -96,10 +103,15 @@ start:
     sta vic+$1b
     sta vic+$1c
     sta vic+$1d
-    ldx #vic_banks_done-$02
+    ldx #joy_x_hi-$02
 -   sta $02,x
     dex
     bpl -
+    lda #160
+    sta joy_x
+    lda #120
+    sta joy_y
+    lda #0
     ldx #0
 -   sta flags,x
     inx
@@ -288,13 +300,13 @@ scope_frame:
     dex
     bpl -
     jmp next_pass
-
 hold_map:
     sta hold
--   jsr instruments
+hold_frame:
+    jsr instruments
     jsr frame
     dec hold
-    bne -
+    bne hold_frame
     rts
 
 clean_label: .text "CHECKS OK"
@@ -624,6 +636,7 @@ sprites_test:
     sta sprite_shape,x
     inx
     bne -
+    jsr install_nmi_vector ; sprite data overlaps KERNAL vector $0318
     ldx #7
 -   lda #sprite_shape/64
     sta screen+1016,x
@@ -880,6 +893,11 @@ install_kernel:
     sta all_ram+256,x
     inx
     bne -
+install_nmi_vector:
+    lda #<nmi_return_ram
+    sta $0318
+    lda #>nmi_return_ram
+    sta $0319
     rts
 kernel_image:
 .logical $0e00
@@ -1083,6 +1101,12 @@ prepare_vic_banks:
     sta bank*$4000+screen+1017+2*bank
     .endfor
     jmp normal_map
+
+; The KERNAL enters through JMP ($0318) on RESTORE. Its stock handler treats
+; RUN/STOP + RESTORE as a BASIC warm start, which is invalid for this ROM-free
+; cartridge. Return directly from the hardware NMI stack frame instead.
+nmi_return_ram:
+    rti
 .cerror * > $1000, "RAM kernel exceeds its qualified pages"
 .here
 
@@ -1378,7 +1402,8 @@ tod_return:
 
 ; Release all columns between scans. Ignore rows already grounded by a
 ; joystick or a short. Accept a change after two equal samples, then
-; toggle only on the press edge so a held key cannot auto-repeat.
+; act only on the press edge so a held key cannot auto-repeat. S and A
+; share PA1; H is on PA3, so retain its state as a separate logical bit.
 read_keys:
     lda cia1+1
     sta tmp
@@ -1391,6 +1416,22 @@ read_keys:
     eor #$ff
     and tmp
     and #anim_key|sound_key
+    pha
+    ldx #8
+    stx cia1+2
+    nop
+    lda cia1+1
+    ldx #0
+    stx cia1+2
+    eor #$ff
+    and tmp
+    and #$20             ; H is PB5 when PA3 is grounded
+    tax
+    pla
+    cpx #0
+    beq +
+    ora #voice_key
++
     cmp keys_sample
     sta keys_sample
     bne keys_done
@@ -1398,6 +1439,23 @@ read_keys:
     eor keys_down
     sty keys_down
     and keys_down
+    beq keys_done
+    and #voice_key
+    beq shortcut_keys
+    inc voice_index
+    lda voice_index
+    cmp #4
+    bcc +
+    lda #0
+    sta voice_index
++   clc
+    adc #$30            ; screen-code digit 0..3
+    ora #$80             ; reverse-video digit in the shortcut bar
+    sta voice_field
+    rts
+shortcut_keys:
+    lda keys_down
+    and #anim_key|sound_key
     beq keys_done
     eor controls_off
     sta controls_off
@@ -1437,23 +1495,158 @@ keys_done:
 switch_text: .text "ON OFF" ^ $80  ; reverse video, like the dashboard title
 
 instruments:
+    jsr keyboard_entry
     jsr read_keys
     jsr poll_tod
     inc phase
     lda controls_off
     and #anim_key
-    bne play_score
+    bne steer_sprite3
     lda phase
     and #3
     bne +
     inc sprite_phase
 +   jsr position_sprites
+steer_sprite3:
+    jsr joystick_sprite3
     jmp play_score
+
+; Either joystick can steer sprite 3. Use all nine VIC X bits to cover the
+; full 320-pixel display, keeping the 24-pixel sprite inside X=24..343.
+joystick_sprite3:
+    ; Release both keyboard ports before reading the active-low joystick
+    ; switches. No keyboard column may remain driven during this sample.
+    lda #0
+    sta cia1+2
+    sta cia1+3
+    lda cia1+1          ; joystick port 1: CIA1 PB0..4
+    eor #$ff
+    and #$1f
+    sta tmp
+    lda cia1            ; joystick port 2: CIA1 PA0..4
+    eor #$ff
+    and #$1f
+    ora tmp
+    sta tmp
+    beq joy_idle
+    lda #100
+    sta joy_timeout
+    lda cia1+8
+    sta joy_tod
+    jmp joy_move
+joy_idle:
+    lda joy_timeout
+    beq joy_return
+    ; CIA TOD advances independently of sweep speed. Count elapsed tenths,
+    ; including samples that skipped a tenth boundary.
+    lda cia1+8
+    cmp #10
+    bcs joy_move
+    tax
+    sec
+    sbc joy_tod
+    bcs +
+    adc #10
++   stx joy_tod
+    sta delta
+    lda joy_timeout
+    sec
+    sbc delta
+    bcc joy_expired
+    beq joy_expired
+    sta joy_timeout
+    jmp joy_move
+joy_expired:
+    lda #0
+    sta joy_timeout
+    lda #1
+    sta vic+$2a
+joy_return:
+    rts
+joy_move:
+    lda tmp
+    and #1
+    beq joy_not_up
+    lda joy_y
+    cmp #52
+    bcc joy_not_up
+    dec joy_y
+    dec joy_y
+joy_not_up:
+    lda tmp
+    and #2
+    beq joy_not_down
+    lda joy_y
+    cmp #218
+    bcs joy_not_down
+    inc joy_y
+    inc joy_y
+joy_not_down:
+    lda tmp
+    and #4
+    beq joy_not_left
+    lda joy_x_hi
+    bne joy_move_left
+    lda joy_x
+    cmp #26
+    bcc joy_not_left
+joy_move_left:
+    lda joy_x
+    sec
+    sbc #2
+    sta joy_x
+    lda joy_x_hi
+    sbc #0
+    sta joy_x_hi
+joy_not_left:
+    lda tmp
+    and #8
+    beq joy_not_right
+    lda joy_x_hi
+    beq joy_move_right
+    lda joy_x
+    cmp #64             ; $140 = 320, rightmost fully visible origin
+    bcs joy_not_right
+joy_move_right:
+    lda joy_x
+    clc
+    adc #2
+    sta joy_x
+    lda joy_x_hi
+    adc #0
+    sta joy_x_hi
+joy_not_right:
+    lda joy_x
+    sta vic+6           ; sprite 3 X
+    lda joy_y
+    sta vic+7           ; sprite 3 Y
+    lda vic+$10
+    and #$f7            ; preserve the other seven sprites' high bits
+    ldx joy_x_hi
+    beq +
+    ora #$08
++
+    sta vic+$10
+    lda tmp
+    and #$10
+    beq joy_no_fire
+    lda #2              ; red while either fire button is held
+    bne joy_set_color
+joy_no_fire:
+    lda #1
+joy_set_color:
+    sta vic+$2a         ; sprite 3 color
+    rts
 position_sprites:
     lda show_orbit
     bne orbit
     ldx #0
--   txa
+sprite_position_loop:
+    cpx #3
+    bne +
+    lda joy_timeout
+    bne sprite_position_next
++   txa
     asl
     asl
     asl
@@ -1488,20 +1681,36 @@ position_sprites:
     tay
     pla
     sta vic+1,y
+sprite_position_next:
     inx
     cpx #8
-    bne -
-    lda #$c0            ; sprites 6 and 7 are to the right of X=255
+    bne sprite_position_loop
+    lda vic+$10
+    and #$08           ; preserve joystick sprite's ninth X bit
+    ldx joy_timeout
+    bne +
+    lda #0
++
+    ora #$c0           ; sprites 6 and 7 are to the right of X=255
     sta vic+$10
     rts
 
 ; During the healthy pass summary the eight sprites orbit the memory map.
 ; The two lookup tables encode actual VIC coordinates, including X bit 8.
 orbit:
-    lda #0
+    lda vic+$10
+    and #$08
     sta vic+$10
     ldx #7
--   txa
+orbit_position_loop:
+    cpx #3
+    bne +
+    lda joy_timeout
+    bne orbit_position_next
+    lda vic+$10
+    and #$f7
+    sta vic+$10
++   txa
     asl
     asl
     asl
@@ -1525,8 +1734,9 @@ orbit:
     sta vic+1,y
     pla
     sta vic,y
+orbit_position_next:
     dex
-    bpl -
+    bpl orbit_position_loop
     rts
 orbit_x_lo: .for i in range(64)
     .byte <int(248+58*cos(2*pi*i/64))
@@ -1582,6 +1792,7 @@ play_score:
     lda #$21
     sta sid+18
 scope:
+    jsr apply_voice_solo
     ; A fresh 32-sample trace on every update. Sample spacing is the CPU
     ; loop, so the trace visibly changes slope as the score changes pitch.
     ldy #0
@@ -1608,6 +1819,29 @@ scope:
     sta color+23*40+36
     lda #67
     sta screen+23*40+36
+    rts
+
+; H cycles voice 1, 2, 3 and 0. Voice 0 leaves all three voices playing.
+; In solo mode release the two unselected
+; voices after each score update; the selected oscillator keeps its normal
+; waveform, ADSR and note sequence so its analog path is easy to hear.
+apply_voice_solo:
+    ldx voice_index
+    cpx #0
+    beq solo_done
+    lda #$10
+    cpx #1
+    beq voice_one
+    sta sid+4
+    cpx #2
+    beq mute_voice3
+    sta sid+11
+    rts
+voice_one:
+    sta sid+11
+mute_voice3:
+    sta sid+18
+solo_done:
     rts
 ; A healthy pass earns a short large-format oscillator display. The map
 ; doubles as 16 columns of samples from OSC3. Individual tests never wait
@@ -1694,11 +1928,13 @@ row .macro s
     .fill 40-len(\s),32
 .endmacro
 layout:
-    .text " LIOTRI C64   S:SOUND "
+    .text " LIOTRI C64 S:SND "
 sound_field = screen+(*-layout)
-    .text "ON   A:SPRITES "
+    .text "ON A:SPR "
 sprite_field = screen+(*-layout)
-    .text "ON "
+    .text "ON H:VOICE "
+voice_field = screen+(*-layout)
+    .text "0 "
     .cerror *-layout != 40, "shortcut bar must fill the first row"
     #row "  MEMORY SWEEP             STARTUP"
     #row " ALU. MAP. VIC IRQ.  0123456789ABCDEF"
@@ -1724,10 +1960,11 @@ sprite_field = screen+(*-layout)
     #row ""
     #row ""
     #row "PASS -- FIRST $---- BITS -- VIC BANK .."
-    .fill 24,32
+
 
 .include "font.asm"
 .cerror * > $a000, "ROML overflow"
+.include "keyboard.asm"
 .fill $a000-*,$ff
 .here
 .enc "ascii"
@@ -1951,6 +2188,8 @@ nmi_entry:
     pla
     rti
 
+.enc "panel"
+.include "keyboard-data.asm"
 .fill $f000-*,$ff
 repair_font .block
     .include "font.asm"
